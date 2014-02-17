@@ -3,12 +3,18 @@ import re
 import pickle
 import postgresql
 import unicodedata
+import logging
+from math import log
 from collections import defaultdict
 from functools import reduce
 
 
 HAM, SPAM = range(0, 2)
 TESTING, TRAINING = range(0, 2)
+
+logging.basicConfig(
+        filename='blackcherry.log',
+        level=logging.DEBUG)
 
 
 class Document:
@@ -53,15 +59,6 @@ class Scoring:
         >>> scoring.dc()
         10
 
-    To get the document frequencies:
-
-        >>> scoring.df('A', SPAM) == 4/5 # dc('a', SPAM) / dc(label=SPAM)
-        True
-        >>> scoring.df(label=SPAM) == 5/10 # dc(label=SPAM) / dc()
-        True
-        >>> scoring.df('A') == 5/10 # dc('a') / dc()
-        True
-
     """
 
     def __init__(self, documents):
@@ -74,21 +71,24 @@ class Scoring:
                 self._dc[term][document.label] += 1
                 self._dc[term][None] += 1
         for term in self.terms():
-            for label in self.labels():
+            for label in self.labels() + [None]:
                 total = self._dc[None][label if term else None]
-                self._df[term][label] = self._dc[term][label] / total
+                dc = self._dc[term][label]
+                self._df[term][label] = abs(log(dc / total)) if self._dc[term][label] else 0
 
     def df(self, term=None, label=None):
+        logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
         return self._df[term][label]
 
     def dc(self, term=None, label=None):
+        logging.debug("dc(%s, %s) = %f" % (term, label, self._dc[term][label]))
         return self._dc[term][label]
 
     def terms(self):
         return self._dc
 
     def labels(self):
-        return self._dc[None]
+        return [label for label in self._dc[None] if label]
 
 
 class Model:
@@ -108,39 +108,39 @@ class Model:
                 Document(terms=['x', 'x', 'x'], label=SPAM), \
                 Document(terms=['A', 'B', 'x'], label=SPAM), \
                 Document(terms=['x', 'A', 'A'], label=SPAM)]
-        >>> model = Model(documents)
+        >>> model = Model(documents, features_size=100)
 
         >>> test = model._p(Document(terms=['A', 'x']), SPAM)
-        >>> correct = (4/5) * (5/5) * (1 - 1/5) * (5/10)
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['B', 'x']), SPAM)
-        >>> correct = (1/5) * (5/5) * (1 - 4/5) * (5/10)
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['A', 'x']), HAM)
-        >>> correct = (1/5) * (4/5) * (1 - 4/5) * (5/10)
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['B', 'x']), HAM)
-        >>> correct = (4/5) * (4/5) * (1 - 1/5) * (5/10)
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
     """
 
-    def __init__(self, documents, file=None):
+    def __init__(self, documents, features_size, file=None):
         if file:
             self._scoring = pickle.load(open(file, 'rb'))
         else:
             self._scoring = Scoring(documents)
             self._features = sorted([feature for feature in self._scoring.terms()],
-                    key=lambda feature: self._d(feature),
+                    key=self._d,
                     reverse=True)
-            self._features = self._features[:1000]
+            self._features = self._features[:features_size]
 
     def save(self, file):
         pickle.dump(file, open(file, 'wb'))
@@ -150,11 +150,13 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
-        return reduce(lambda t1, t2: t1 * self._prior(t2, document, label), self._features, 1)
+        p = reduce(lambda t1, t2: t1 + self._likelihood(t2, document, label), self._features, 1)
+        logging.debug("p(%s, %s) = %f" % (document.terms, label, p))
+        return p
 
-    def _prior(self, term, document, label):
-        df = self._scoring.df(term, label)
-        return df if term in document else 1 - df
+    def _likelihood(self, term, document, label):
+        return reduce(lambda l1, l2: l1 + (1 - self._scoring.df(term, label)),
+                self._scoring.labels(), self._scoring.df(term, label))
 
     def _d(self, feature):
         return max(self._scoring._df[feature].values()) - min(self._scoring._df[feature].values())
@@ -174,10 +176,10 @@ class Classifier:
 
     """
 
-    def __init__(self):
+    def __init__(self, limit=10000, features_size=300):
         self._tokenizer = Tokenizer()
         self._repository = Repository('repository.db')
-        self._model = Model(self._documents(TRAINING, 10000))
+        self._model = Model(self._documents(TRAINING, limit), features_size)
 
     def save(self, file):
         self._model.save(file)
@@ -186,10 +188,10 @@ class Classifier:
         document = Document(self._tokenizer.tokens(text))
         return self._model.classify(self, document)
 
-    def test(self):
+    def test(self, limit=1000):
         total = defaultdict(int)
         corrects = defaultdict(int)
-        documents = self._documents(TESTING, 1000)
+        documents = self._documents(TESTING, limit)
 
         mod = len(documents) / 100 * 10
         for i, document in enumerate(documents):
@@ -204,39 +206,36 @@ class Classifier:
         print("%d/%d ham detected" % (corrects[HAM], total[HAM]))
         print("%.2f%% correct" % (sum(corrects.values()) / sum(total.values()) * 100))
 
-    def dump_terms(self, terms=None):
-        prev_row = [[]]
-        duplicates = 0
+    def table_terms(self, terms=None):
         terms = set(terms or self._model._scoring.terms())
-        order_by = lambda term: self._model._scoring.df(term, HAM) - self._model._scoring.df(term, SPAM)
-        print("term", "dc(S)", "dc(H)", "df(S)", "df(H)", sep='\t', end='')
-        for i, term in enumerate(sorted(terms, key=order_by)):
-            row = [term]
-            row += [round(self._model._scoring.dc(term, label), 2) for label in [SPAM, HAM]]
-            row += [round(self._model._scoring.df(term, label), 2) for label in [SPAM, HAM]]
-            if row[1:] == prev_row[1:] and i < len(terms) - 1:
-                duplicates += 1
-                prev_row[0].append(row[0])
-            else:
-                if duplicates:
-                    print(" (...) %d times for terms: %s, etc." % (duplicates, ', '.join(prev_row[0][:5])))
-                else:
-                    print()
-                duplicates = 0
-                prev_row = [[]]
-                prev_row[1:] = row[1:]
-                print(*row, sep='\t', end='')
-        print("\n%d terms" % len(terms))
+        for i, term in enumerate(terms):
+            row = []
+            row.append(term)
+            for label in [SPAM, HAM]:
+                row.append(self._model._scoring.dc(term, label))
+                row.append(self._model._scoring.df(term, label))
+            row.append(self._model._scoring.df(term, HAM) - self._model._scoring.df(term, SPAM))
+            rows.append(row)
+        return rows
 
-    def dump_documents(self, documents=None):
-        prev_row = None
+    def table_documents(self, limit=1000, documents=None):
+        rows = []
+        documents = documents or self._documents(TESTING, limit)
+        for document in documents:
+            features=set(self._model._features).intersection(set(document.terms))
+            rows.append((
+                len(features),
+                [self._model._p(document, label) for label in [SPAM, HAM]],
+                features))
+        return rows
+
+    def dump(self, rows, order_by=0, truncate=None, reverse=True):
         duplicates = 0
-        documents = documents or self._documents(TESTING, 1000)
-        order_by = lambda document: max(self._model._p(document, SPAM), self._model._p(document, HAM))
-        print("p(S)", "p(H)", sep='\t', end='')
-        for i, document in enumerate(sorted(documents, key=order_by)):
-            row = [round(self._model._p(document, label), 2) for label in [SPAM, HAM]]
-            if row == prev_row and i < len(documents) - 1:
+        prev_row = None
+        rows = sorted(rows, key=lambda row: row[order_by], reverse=reverse)
+        rows = rows[:truncate]
+        for i, row in enumerate(rows):
+            if row == prev_row and i < len(rows) - 1:
                 duplicates += 1
             else:
                 if duplicates:
@@ -246,7 +245,8 @@ class Classifier:
                 duplicates = 0
                 print(*row, sep='\t', end='')
                 prev_row = row
-        print("\n%d documents" % len(documents))
+        print("\nTotal = %d rows%s" % (len(rows),
+            "%d truncated" % truncate if truncate else ""))
 
     def _documents(self, selector, limit):
         data = self._repository.get(selector, limit)
