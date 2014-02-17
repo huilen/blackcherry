@@ -3,12 +3,18 @@ import re
 import pickle
 import postgresql
 import unicodedata
+import logging
+from math import log
 from collections import defaultdict
 from functools import reduce
 
 
 HAM, SPAM = range(0, 2)
 TESTING, TRAINING = range(0, 2)
+
+logging.basicConfig(
+        filename='blackcherry.log',
+        level=logging.DEBUG)
 
 
 class Document:
@@ -55,11 +61,11 @@ class Scoring:
 
     To get the document frequencies:
 
-        >>> scoring.df('A', SPAM) == 4/5 # dc('a', SPAM) / dc(label=SPAM)
+        >>> scoring.df('A', SPAM) == log(4/5) # dc('a', SPAM) / dc(label=SPAM)
         True
-        >>> scoring.df(label=SPAM) == 5/10 # dc(label=SPAM) / dc()
+        >>> scoring.df(label=SPAM) == log(5/10) # dc(label=SPAM) / dc()
         True
-        >>> scoring.df('A') == 5/10 # dc('a') / dc()
+        >>> scoring.df('A') == log(5/10) # dc('a') / dc()
         True
 
     """
@@ -76,12 +82,15 @@ class Scoring:
         for term in self.terms():
             for label in self.labels():
                 total = self._dc[None][label if term else None]
-                self._df[term][label] = self._dc[term][label] / total
+                dc = self._dc[term][label]
+                self._df[term][label] = abs(log(dc / total)) if self._dc[term][label] else 0
 
     def df(self, term=None, label=None):
+        logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
         return self._df[term][label]
 
     def dc(self, term=None, label=None):
+        logging.debug("dc(%s, %s) = %f" % (term, label, self._dc[term][label]))
         return self._dc[term][label]
 
     def terms(self):
@@ -108,39 +117,39 @@ class Model:
                 Document(terms=['x', 'x', 'x'], label=SPAM), \
                 Document(terms=['A', 'B', 'x'], label=SPAM), \
                 Document(terms=['x', 'A', 'A'], label=SPAM)]
-        >>> model = Model(documents)
+        >>> model = Model(documents, features_size=100)
 
         >>> test = model._p(Document(terms=['A', 'x']), SPAM)
-        >>> correct = (4/5) * (5/5) * (1 - 1/5) * (5/10)
+        >>> correct =
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['B', 'x']), SPAM)
-        >>> correct = (1/5) * (5/5) * (1 - 4/5) * (5/10)
+        >>> correct =
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['A', 'x']), HAM)
-        >>> correct = (1/5) * (4/5) * (1 - 4/5) * (5/10)
+        >>> correct =
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['B', 'x']), HAM)
-        >>> correct = (4/5) * (4/5) * (1 - 1/5) * (5/10)
+        >>> correct =
         >>> round(test, 3) == round(correct, 3)
         True
 
     """
 
-    def __init__(self, documents, file=None):
+    def __init__(self, documents, features_size, file=None):
         if file:
             self._scoring = pickle.load(open(file, 'rb'))
         else:
             self._scoring = Scoring(documents)
             self._features = sorted([feature for feature in self._scoring.terms()],
-                    key=lambda feature: self._d(feature),
+                    key=self._d,
                     reverse=True)
-            self._features = self._features[:1000]
+            self._features = self._features[:features_size]
 
     def save(self, file):
         pickle.dump(file, open(file, 'wb'))
@@ -150,11 +159,13 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
-        return reduce(lambda t1, t2: t1 * self._prior(t2, document, label), self._features, 1)
+        p = reduce(lambda t1, t2: t1 + self._likelihood(t2, document, label), self._features, 1)
+        logging("p(%s, %s) = %f" % (document.terms, label, p))
+        return p
 
-    def _prior(self, term, document, label):
-        df = self._scoring.df(term, label)
-        return df if term in document else 1 - df
+    def _likelihood(self, term, document, label):
+        return reduce(lambda l1, l2: l1 + (1 - self._scoring.df(term, label)),
+                self._scoring.labels(), self._scoring.df(term, label))
 
     def _d(self, feature):
         return max(self._scoring._df[feature].values()) - min(self._scoring._df[feature].values())
@@ -174,10 +185,10 @@ class Classifier:
 
     """
 
-    def __init__(self):
+    def __init__(self, limit=10000, features_size=300):
         self._tokenizer = Tokenizer()
         self._repository = Repository('repository.db')
-        self._model = Model(self._documents(TRAINING, 10000))
+        self._model = Model(self._documents(TRAINING, limit), features_size)
 
     def save(self, file):
         self._model.save(file)
@@ -186,10 +197,10 @@ class Classifier:
         document = Document(self._tokenizer.tokens(text))
         return self._model.classify(self, document)
 
-    def test(self):
+    def test(self, limit=1000):
         total = defaultdict(int)
         corrects = defaultdict(int)
-        documents = self._documents(TESTING, 1000)
+        documents = self._documents(TESTING, limit)
 
         mod = len(documents) / 100 * 10
         for i, document in enumerate(documents):
@@ -228,10 +239,10 @@ class Classifier:
                 print(*row, sep='\t', end='')
         print("\n%d terms" % len(terms))
 
-    def dump_documents(self, documents=None):
+    def dump_documents(self, limit=1000, documents=None):
         prev_row = None
         duplicates = 0
-        documents = documents or self._documents(TESTING, 1000)
+        documents = documents or self._documents(TESTING, limit)
         order_by = lambda document: max(self._model._p(document, SPAM), self._model._p(document, HAM))
         print("p(S)", "p(H)", sep='\t', end='')
         for i, document in enumerate(sorted(documents, key=order_by)):
