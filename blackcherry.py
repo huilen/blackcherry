@@ -2,9 +2,7 @@ import os
 import re
 import pickle
 import postgresql
-import math
 import unicodedata
-import itertools
 from collections import defaultdict
 from functools import reduce
 
@@ -104,13 +102,13 @@ class Model:
                 Document(terms=['j', 'd', 'h'], label=SPAM)]
         >>> model = Model(documents)
 
-        >>> "%.2f" % model.p(Document(terms=['a', 'd']), SPAM) # df('a', SPAM) * df('d', SPAM) * df(SPAM)
+        >>> "%.2f" % model._p(Document(terms=['a', 'd']), SPAM) # df('a', SPAM) * df('d', SPAM) * df(SPAM)
         '0.11'
-        >>> "%.2f" % model.p(Document(terms=['a', 'd']), HAM) # df('a', HAM) * df('d', HAM) * df(HAM)
+        >>> "%.2f" % model._p(Document(terms=['a', 'd']), HAM) # df('a', HAM) * df('d', HAM) * df(HAM)
         '0.11'
-        >>> "%.2f" % model.p(Document(terms=['a', 'e']), SPAM) # df('a', SPAM) * df('e', SPAM) * df(SPAM)
+        >>> "%.2f" % model._p(Document(terms=['a', 'e']), SPAM) # df('a', SPAM) * df('e', SPAM) * df(SPAM)
         '0.00'
-        >>> "%.2f" % model.p(Document(terms=['a', 'e']), HAM) # df('a', HAM) * df('e', HAM) * df(HAM)
+        >>> "%.2f" % model._p(Document(terms=['a', 'e']), HAM) # df('a', HAM) * df('e', HAM) * df(HAM)
         '0.11'
         >>> model.classify(Document(terms=['a', 'e'])) # max(p(document, HAM), p(document, SPAM))
         0
@@ -122,6 +120,10 @@ class Model:
             self._scoring = pickle.load(open(file, 'rb'))
         else:
             self._scoring = Scoring(documents)
+            self._features = sorted([feature for feature in self._scoring.terms()],
+                    key=lambda feature: self._d(feature),
+                    reverse=True)
+            self._features = self._features[:200]
 
     def save(self, file):
         pickle.dump(file, open(file, 'wb'))
@@ -131,8 +133,14 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
-        terms = set(self._scoring.terms()).intersection(document)
-        return reduce(lambda t1, t2: t1 * self._scoring.df(t2, label), terms, 1) * self._scoring.df(None, label)
+        return reduce(lambda t1, t2: t1 * self._prior(t2, document, label), self._features, 1) * self._scoring.df(None, label)
+
+    def _prior(self, term, document, label):
+        df = self._scoring.df(term, label)
+        return df if term in document else 1 - df
+
+    def _d(self, feature):
+        return max(self._scoring._df[feature].values()) - min(self._scoring._df[feature].values())
 
 
 class Classifier:
@@ -152,7 +160,7 @@ class Classifier:
     def __init__(self):
         self._tokenizer = Tokenizer()
         self._repository = Repository('repository.db')
-        self._model = Model(self._documents(TRAINING, 5000))
+        self._model = Model(self._documents(TRAINING, 1000))
 
     def save(self, file):
         self._model.save(file)
@@ -179,27 +187,49 @@ class Classifier:
         print("%d/%d ham detected" % (corrects[HAM], total[HAM]))
         print("%.2f%% correct" % (sum(corrects.values()) / sum(total.values()) * 100))
 
-    def dump_terms(self, terms):
-        pass
+    def dump_terms(self, terms=None):
+        prev_row = [[]]
+        duplicates = 0
+        terms = set(terms or self._model._scoring.terms())
+        order_by = lambda term: self._model._scoring.df(term, HAM) - self._model._scoring.df(term, SPAM)
+        print("term", "dc(S)", "dc(H)", "df(S)", "df(H)", sep='\t', end='')
+        for i, term in enumerate(sorted(terms, key=order_by)):
+            row = [term]
+            row += [round(self._model._scoring.dc(term, label), 2) for label in [SPAM, HAM]]
+            row += [round(self._model._scoring.df(term, label), 2) for label in [SPAM, HAM]]
+            if row[1:] == prev_row[1:] and i < len(terms) - 1:
+                duplicates += 1
+                prev_row[0].append(row[0])
+            else:
+                if duplicates:
+                    print(" (...) %d times for terms: %s, etc." % (duplicates, ', '.join(prev_row[0][:5])))
+                else:
+                    print()
+                duplicates = 0
+                prev_row = [[]]
+                prev_row[1:] = row[1:]
+                print(*row, sep='\t', end='')
+        print("\n%d terms" % len(terms))
 
-    def dump_documents(self, documents):
+    def dump_documents(self, documents=None):
         prev_row = None
-        duplicated = 0
+        duplicates = 0
+        documents = documents or self._documents(TESTING, 1000)
         order_by = lambda document: max(self._model._p(document, SPAM), self._model._p(document, HAM))
         print("p(S)", "p(H)", sep='\t', end='')
         for i, document in enumerate(sorted(documents, key=order_by)):
-            row = (self._model._p(document, SPAM), self._model._p(document, HAM))
+            row = [round(self._model._p(document, label), 2) for label in [SPAM, HAM]]
             if row == prev_row and i < len(documents) - 1:
-                duplicated += 1
+                duplicates += 1
             else:
-                if duplicated:
-                    print(" (...) %d times" % duplicated)
+                if duplicates:
+                    print(" (...) %d times" % duplicates)
                 else:
                     print()
-                duplicated = 0
+                duplicates = 0
                 print(*row, sep='\t', end='')
                 prev_row = row
-        print("\n%d total" % len(documents))
+        print("\n%d documents" % len(documents))
 
     def _documents(self, selector, limit):
         data = self._repository.get(selector, limit)
