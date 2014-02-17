@@ -208,6 +208,7 @@ class Classifier:
 
     def table_terms(self, terms=None):
         terms = set(terms or self._model._scoring.terms())
+        rows = []
         for i, term in enumerate(terms):
             row = []
             row.append(term)
@@ -225,17 +226,17 @@ class Classifier:
             features=set(self._model._features).intersection(set(document.terms))
             rows.append((
                 len(features),
-                [self._model._p(document, label) for label in [SPAM, HAM]],
-                features))
+                [self._model._p(document, label) for label in [SPAM, HAM]], features))
         return rows
 
-    def dump(self, rows, order_by=0, truncate=None, reverse=True):
+    def dump(self, rows, order_by=0, truncate=None, reverse=True, uniq=0):
         duplicates = 0
         prev_row = None
         rows = sorted(rows, key=lambda row: row[order_by], reverse=reverse)
+        total = len(rows)
         rows = rows[:truncate]
         for i, row in enumerate(rows):
-            if row == prev_row and i < len(rows) - 1:
+            if row[uniq:] == prev_row and i < len(rows) - 1:
                 duplicates += 1
             else:
                 if duplicates:
@@ -244,9 +245,8 @@ class Classifier:
                     print()
                 duplicates = 0
                 print(*row, sep='\t', end='')
-                prev_row = row
-        print("\nTotal = %d rows%s" % (len(rows),
-            "%d truncated" % truncate if truncate else ""))
+                prev_row = row[uniq:]
+        print("\nTotal = %d rows" % total)
 
     def _documents(self, selector, limit):
         data = self._repository.get(selector, limit)
@@ -409,3 +409,8 @@ class Repository:
 if __name__ == "__main__":
     import doctest
     doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
+    classifier = Classifier(10000, features_size=300)
+    classifier.dump(classifier.table_terms(),
+            order_by=5, truncate=1000, reverse=True, uniq=1)
+    classifier.dump(classifier.table_documents(),
+            order_by=0, truncate=1000, reverse=True, uniq=0)
