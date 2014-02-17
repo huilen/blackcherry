@@ -30,33 +30,37 @@ class Scoring:
     Creating a scoring for a collection of documents:
 
         >>> documents = [ \
-                Document(terms=['a', 'b', 'c'], label=HAM), \
-                Document(terms=['a', 'f', 'e'], label=HAM), \
-                Document(terms=['h', 'd', 'h'], label=HAM), \
-                Document(terms=['b', 'a', 'g'], label=SPAM), \
-                Document(terms=['a', 'a', 'f'], label=SPAM), \
-                Document(terms=['j', 'd', 'h'], label=SPAM)]
+                Document(terms=['A', 'B', 'A'], label=HAM), \
+                Document(terms=['x', 'B', 'x'], label=HAM), \
+                Document(terms=['B', 'x', 'x'], label=HAM), \
+                Document(terms=['x', 'x', 'B'], label=HAM), \
+                Document(terms=['x', 'x', 'x'], label=HAM), \
+                Document(terms=['A', 'x', 'x'], label=SPAM), \
+                Document(terms=['x', 'A', 'x'], label=SPAM), \
+                Document(terms=['x', 'x', 'x'], label=SPAM), \
+                Document(terms=['A', 'B', 'x'], label=SPAM), \
+                Document(terms=['x', 'A', 'A'], label=SPAM)]
         >>> scoring = Scoring(documents)
 
     To get the document counts:
 
-        >>> scoring.dc('a', SPAM)
-        2
-        >>> scoring.dc(label=SPAM)
-        3
-        >>> scoring.dc('a')
+        >>> scoring.dc('A', SPAM)
         4
+        >>> scoring.dc(label=SPAM)
+        5
+        >>> scoring.dc('A')
+        5
         >>> scoring.dc()
-        6
+        10
 
     To get the document frequencies:
 
-        >>> "%.2f" % scoring.df('a', SPAM) # dc('a', SPAM) / dc(label=SPAM)
-        '0.67'
-        >>> "%.2f" % scoring.df(label=SPAM) # dc(label=SPAM) / dc()
-        '0.50'
-        >>> "%.2f" % scoring.df('a') # dc('a') / dc()
-        '0.67'
+        >>> scoring.df('A', SPAM) == 4/5 # dc('a', SPAM) / dc(label=SPAM)
+        True
+        >>> scoring.df(label=SPAM) == 5/10 # dc(label=SPAM) / dc()
+        True
+        >>> scoring.df('A') == 5/10 # dc('a') / dc()
+        True
 
     """
 
@@ -94,24 +98,37 @@ class Model:
     terms.
 
         >>> documents = [ \
-                Document(terms=['a', 'b', 'c'], label=HAM), \
-                Document(terms=['a', 'f', 'e'], label=HAM), \
-                Document(terms=['h', 'd', 'h'], label=HAM), \
-                Document(terms=['b', 'a', 'g'], label=SPAM), \
-                Document(terms=['a', 'a', 'f'], label=SPAM), \
-                Document(terms=['j', 'd', 'h'], label=SPAM)]
+                Document(terms=['A', 'B', 'A'], label=HAM), \
+                Document(terms=['x', 'B', 'x'], label=HAM), \
+                Document(terms=['B', 'x', 'x'], label=HAM), \
+                Document(terms=['x', 'x', 'B'], label=HAM), \
+                Document(terms=['x', 'x', 'x'], label=HAM), \
+                Document(terms=['A', 'x', 'x'], label=SPAM), \
+                Document(terms=['x', 'A', 'x'], label=SPAM), \
+                Document(terms=['x', 'x', 'x'], label=SPAM), \
+                Document(terms=['A', 'B', 'x'], label=SPAM), \
+                Document(terms=['x', 'A', 'A'], label=SPAM)]
         >>> model = Model(documents)
 
-        >>> "%.2f" % model._p(Document(terms=['a', 'd']), SPAM) # df('a', SPAM) * df('d', SPAM) * df(SPAM)
-        '0.11'
-        >>> "%.2f" % model._p(Document(terms=['a', 'd']), HAM) # df('a', HAM) * df('d', HAM) * df(HAM)
-        '0.11'
-        >>> "%.2f" % model._p(Document(terms=['a', 'e']), SPAM) # df('a', SPAM) * df('e', SPAM) * df(SPAM)
-        '0.00'
-        >>> "%.2f" % model._p(Document(terms=['a', 'e']), HAM) # df('a', HAM) * df('e', HAM) * df(HAM)
-        '0.11'
-        >>> model.classify(Document(terms=['a', 'e'])) # max(p(document, HAM), p(document, SPAM))
-        0
+        >>> test = model._p(Document(terms=['A', 'x']), SPAM)
+        >>> correct = (4/5) * (5/5) * (1 - 1/5) * (5/10)
+        >>> round(test, 3) == round(correct, 3)
+        True
+
+        >>> test = model._p(Document(terms=['B', 'x']), SPAM)
+        >>> correct = (1/5) * (5/5) * (1 - 4/5) * (5/10)
+        >>> round(test, 3) == round(correct, 3)
+        True
+
+        >>> test = model._p(Document(terms=['A', 'x']), HAM)
+        >>> correct = (1/5) * (4/5) * (1 - 4/5) * (5/10)
+        >>> round(test, 3) == round(correct, 3)
+        True
+
+        >>> test = model._p(Document(terms=['B', 'x']), HAM)
+        >>> correct = (4/5) * (4/5) * (1 - 1/5) * (5/10)
+        >>> round(test, 3) == round(correct, 3)
+        True
 
     """
 
@@ -123,7 +140,7 @@ class Model:
             self._features = sorted([feature for feature in self._scoring.terms()],
                     key=lambda feature: self._d(feature),
                     reverse=True)
-            self._features = self._features[:200]
+            self._features = self._features[:1000]
 
     def save(self, file):
         pickle.dump(file, open(file, 'wb'))
@@ -133,7 +150,7 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
-        return reduce(lambda t1, t2: t1 * self._prior(t2, document, label), self._features, 1) * self._scoring.df(None, label)
+        return reduce(lambda t1, t2: t1 * self._prior(t2, document, label), self._features, 1)
 
     def _prior(self, term, document, label):
         df = self._scoring.df(term, label)
@@ -160,7 +177,7 @@ class Classifier:
     def __init__(self):
         self._tokenizer = Tokenizer()
         self._repository = Repository('repository.db')
-        self._model = Model(self._documents(TRAINING, 1000))
+        self._model = Model(self._documents(TRAINING, 10000))
 
     def save(self, file):
         self._model.save(file)
@@ -253,9 +270,9 @@ class Tokenizer:
 
         >>> tokenizer.set_meta_tokens()
         >>> tokenizer.set_size_meta_tokens()
-        >>> tokenizer.tokens('Buy VIAGRA! dontbeleveus@itsallalie.com')
-        ['buy', 'viagra', 'dontbeleveus', 'itsallalie', 'com',
-                '__EMAIL__', '__ALLCAPS__', '__SIZE10-49__']
+        >>> sorted(tokenizer.tokens('Buy VIAGRA! dontbeleveus@itsallalie.com'))
+        ['__ALLCAPS__', '__EMAIL__', '__SIZE10-49__',
+                'buy', 'com', 'dontbeleveus', 'itsallalie', 'viagra']
 
     """
 
