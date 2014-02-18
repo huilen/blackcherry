@@ -74,8 +74,10 @@ class Scoring:
             for label in self.labels():
                 total = self._dc[None][label]
                 dc = self._dc[term][label]
-                self._df[term][label] = abs(log(dc / total)) if self._dc[term][label] else 0
-            self._df[term][None] = abs(log(self._dc[term][None] / self._dc[None][None]))
+                if not total:
+                    import pdb; pdb.set_trace()
+                self._df[term][label] = abs(log(1 + dc / total))
+            self._df[term][None] = abs(log(1 + self._dc[term][None] / self._dc[None][None]))
 
     def df(self, term=None, label=None):
         logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
@@ -213,7 +215,7 @@ class Classifier:
         for i, term in enumerate(terms):
             row = []
             row.append(term)
-            for label in [SPAM, HAM]:
+            for label in self._model._scoring.labels():
                 row.append(self._model._scoring.dc(term, label))
                 row.append(self._model._scoring.df(term, label))
             row.append(self._model._d(term))
@@ -227,8 +229,18 @@ class Classifier:
             features=set(self._model._features).intersection(set(document.terms))
             rows.append((
                 len(features),
-                [self._model._p(document, label) for label in [SPAM, HAM]], features))
+                [self._model._p(document, label)
+                    for label in self._model._scoring.labels()], features))
         return rows
+
+    def stats(self):
+        for label in self._model._scoring.labels():
+            print("Documents for label(%d) = %d" %
+                    (label, self._model._scoring.dc(label)))
+            print("Features for label(%d) = %d" %
+                    (label, len(self._model._features)))
+            print("Terms for label(%d) = %d" %
+                    (label, len(self._model._scoring.terms())))
 
     def dump(self, rows,
             order_by=0,
@@ -417,7 +429,7 @@ if __name__ == "__main__":
     import doctest
     doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
     classifier = Classifier(3000, features_size=150)
-    classifier.dump(classifier.table_terms(), order_by=5, truncate=1000, reverse=True, uniq=1)
+    classifier.stats()
+    classifier.dump(classifier.table_terms(), order_by=2, truncate=150, reverse=True, uniq=1)
     classifier.dump(classifier.table_documents(),
             order_by=0, truncate=1000, reverse=True, uniq=0)
-    classifier._repository.save('repository.db')
