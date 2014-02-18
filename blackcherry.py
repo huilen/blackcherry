@@ -62,20 +62,24 @@ class Scoring:
     """
 
     def __init__(self, documents):
+        self._tc = defaultdict(int)
         self._dc = defaultdict(lambda: defaultdict(int))
         self._df = defaultdict(lambda: defaultdict(int))
         for document in documents:
             self._dc[None][document.label] += 1
             self._dc[None][None] += 1
             for term in set(document):
+                self._tc[document.label] += 1
+                self._tc[None] += 1
                 self._dc[term][document.label] += 1
                 self._dc[term][None] += 1
         for term in self.terms():
             for label in self.labels():
-                total = self._dc[None][label]
                 dc = self._dc[term][label]
+                total = self._dc[None][label] / self._tc[label]
                 self._df[term][label] = abs(log(1 + dc / total))
-            self._df[term][None] = abs(log(1 + self._dc[term][None] / self._dc[None][None]))
+            dc = self._dc[term][None]
+            self._df[term][None] = self._dc[None][None] / self._tc[None]
 
     def df(self, term=None, label=None):
         logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
@@ -141,7 +145,7 @@ class Model:
             self._features = sorted([feature for feature in self._scoring.terms()],
                     key=self._d,
                     reverse=True)
-            self._features = self._features[:features_size]
+            self._features = set(self._features[:features_size])
 
     def save(self, file):
         pickle.dump(file, open(file, 'wb'))
@@ -153,18 +157,20 @@ class Model:
     def _p(self, document, label):
         p = reduce(lambda p, feature:
                 p + self._likelihood(feature, label),
-                self._features, 0)
+                self._features.intersection(document.terms), 0)
         logging.debug("p(%s, %s) = %f" % (document.terms, label, p))
         return p
 
     def _likelihood(self, feature, label):
-        not_label = self._scoring.labels() - {label}
-        return reduce(lambda likelihood, label:
-                likelihood + (1 - self._scoring.df(feature, label)),
-                not_label, self._scoring.df(feature, label))
+        return self._scoring.df(feature, label)
+        #not_label = self._scoring.labels() - {label}
+        #return reduce(lambda likelihood, label:
+        #        likelihood + (1 - self._scoring.df(feature, label)),
+        #        not_label, self._scoring.df(feature, label))
 
     def _d(self, feature):
-        return max(self._scoring._df[feature].values()) - min(self._scoring._df[feature].values())
+        df_by_label = [self._scoring._df[feature][label] for label in self._scoring._df[feature] if label is not None]
+        return max(df_by_label) - min(df_by_label)
 
 
 class Classifier:
@@ -430,7 +436,7 @@ if __name__ == "__main__":
     doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
     classifier = Classifier(3000, features_size=100)
     classifier.stats()
-    #classifier.test()
+    classifier.test()
     classifier.dump(classifier.table_terms(), order_by=4, truncate=150, reverse=True, uniq=1)
     classifier.dump(classifier.table_terms(classifier._model._features))
     classifier.dump(classifier.table_documents(),
