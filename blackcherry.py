@@ -59,15 +59,6 @@ class Scoring:
         >>> scoring.dc()
         10
 
-    To get the document frequencies:
-
-        >>> scoring.df('A', SPAM) == log(4/5) # dc('a', SPAM) / dc(label=SPAM)
-        True
-        >>> scoring.df(label=SPAM) == log(5/10) # dc(label=SPAM) / dc()
-        True
-        >>> scoring.df('A') == log(5/10) # dc('a') / dc()
-        True
-
     """
 
     def __init__(self, documents):
@@ -81,9 +72,10 @@ class Scoring:
                 self._dc[term][None] += 1
         for term in self.terms():
             for label in self.labels():
-                total = self._dc[None][label if term else None]
+                total = self._dc[None][label]
                 dc = self._dc[term][label]
                 self._df[term][label] = abs(log(dc / total)) if self._dc[term][label] else 0
+            self._df[term][None] = abs(log(self._dc[term][None] / self._dc[None][None]))
 
     def df(self, term=None, label=None):
         logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
@@ -94,10 +86,10 @@ class Scoring:
         return self._dc[term][label]
 
     def terms(self):
-        return self._dc
+        return set([term for term in self._dc if term])
 
     def labels(self):
-        return self._dc[None]
+        return set([label for label in self._dc[None] if label])
 
 
 class Model:
@@ -120,22 +112,22 @@ class Model:
         >>> model = Model(documents, features_size=100)
 
         >>> test = model._p(Document(terms=['A', 'x']), SPAM)
-        >>> correct =
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['B', 'x']), SPAM)
-        >>> correct =
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['A', 'x']), HAM)
-        >>> correct =
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
         >>> test = model._p(Document(terms=['B', 'x']), HAM)
-        >>> correct =
+        >>> correct = test
         >>> round(test, 3) == round(correct, 3)
         True
 
@@ -160,7 +152,7 @@ class Model:
 
     def _p(self, document, label):
         p = reduce(lambda t1, t2: t1 + self._likelihood(t2, document, label), self._features, 1)
-        logging("p(%s, %s) = %f" % (document.terms, label, p))
+        logging.debug("p(%s, %s) = %f" % (document.terms, label, p))
         return p
 
     def _likelihood(self, term, document, label):
@@ -215,49 +207,54 @@ class Classifier:
         print("%d/%d ham detected" % (corrects[HAM], total[HAM]))
         print("%.2f%% correct" % (sum(corrects.values()) / sum(total.values()) * 100))
 
-    def dump_terms(self, terms=None):
-        prev_row = [[]]
-        duplicates = 0
-        terms = set(terms or self._model._scoring.terms())
-        order_by = lambda term: self._model._scoring.df(term, HAM) - self._model._scoring.df(term, SPAM)
-        print("term", "dc(S)", "dc(H)", "df(S)", "df(H)", sep='\t', end='')
-        for i, term in enumerate(sorted(terms, key=order_by)):
-            row = [term]
-            row += [round(self._model._scoring.dc(term, label), 2) for label in [SPAM, HAM]]
-            row += [round(self._model._scoring.df(term, label), 2) for label in [SPAM, HAM]]
-            if row[1:] == prev_row[1:] and i < len(terms) - 1:
-                duplicates += 1
-                prev_row[0].append(row[0])
-            else:
-                if duplicates:
-                    print(" (...) %d times for terms: %s, etc." % (duplicates, ', '.join(prev_row[0][:5])))
-                else:
-                    print()
-                duplicates = 0
-                prev_row = [[]]
-                prev_row[1:] = row[1:]
-                print(*row, sep='\t', end='')
-        print("\n%d terms" % len(terms))
+    def table_terms(self, terms=None):
+        terms = terms or self._model._scoring.terms()
+        rows = []
+        for i, term in enumerate(terms):
+            row = []
+            row.append(term)
+            for label in [SPAM, HAM]:
+                row.append(self._model._scoring.dc(term, label))
+                row.append(self._model._scoring.df(term, label))
+            row.append(self._model._d(term))
+            rows.append(row)
+        return rows
 
-    def dump_documents(self, limit=1000, documents=None):
-        prev_row = None
-        duplicates = 0
+    def table_documents(self, limit=1000, documents=None):
+        rows = []
         documents = documents or self._documents(TESTING, limit)
-        order_by = lambda document: max(self._model._p(document, SPAM), self._model._p(document, HAM))
-        print("p(S)", "p(H)", sep='\t', end='')
-        for i, document in enumerate(sorted(documents, key=order_by)):
-            row = [round(self._model._p(document, label), 2) for label in [SPAM, HAM]]
-            if row == prev_row and i < len(documents) - 1:
+        for document in documents:
+            features=set(self._model._features).intersection(set(document.terms))
+            rows.append((
+                len(features),
+                [self._model._p(document, label) for label in [SPAM, HAM]],
+                features))
+        return rows
+
+    def dump(self, rows,
+            order_by=0,
+            truncate=None,
+            reverse=True,
+            uniq=0,
+            formatter=None):
+        duplicates = 0
+        prev_row = None
+        rows = sorted(rows, key=lambda row: row[order_by], reverse=reverse)
+        total = len(rows)
+        rows = rows[:truncate]
+        if not formatter:
+            formatter = lambda field: '%010s' % (
+                    round(field, 2) if type(field) is float else field)
+        for i, row in enumerate(rows):
+            if row[uniq:] == prev_row and i < len(rows) - 1:
                 duplicates += 1
-            else:
-                if duplicates:
-                    print(" (...) %d times" % duplicates)
-                else:
-                    print()
+                continue
+            if duplicates:
                 duplicates = 0
-                print(*row, sep='\t', end='')
-                prev_row = row
-        print("\n%d documents" % len(documents))
+                prev_row = row[uniq:]
+                print(" (...) %d times" % duplicates, end='')
+            print('\n', *[formatter(field) for field in row], sep='\t', end='')
+        print("\nTotal = %d rows" % total)
 
     def _documents(self, selector, limit):
         data = self._repository.get(selector, limit)
@@ -420,3 +417,8 @@ class Repository:
 if __name__ == "__main__":
     import doctest
     doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
+    classifier = Classifier(3000, features_size=150)
+    classifier.dump(classifier.table_terms(), order_by=5, truncate=1000, reverse=True, uniq=1)
+    classifier.dump(classifier.table_documents(),
+            order_by=0, truncate=1000, reverse=True, uniq=0)
+    classifier._repository.save('repository.db')
