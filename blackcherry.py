@@ -1,20 +1,18 @@
 import os
+import sys
 import re
 import pickle
 import postgresql
 import unicodedata
 import logging
 from math import log
+from math import sqrt
 from collections import defaultdict
 from functools import reduce
 
 
 HAM, SPAM = range(0, 2)
 TESTING, TRAINING = range(0, 2)
-
-logging.basicConfig(
-        filename='blackcherry.log',
-        level=logging.DEBUG)
 
 
 class Document:
@@ -62,19 +60,25 @@ class Scoring:
     """
 
     def __init__(self, documents):
+        #self._tc = defaultdict(int)
         self._dc = defaultdict(lambda: defaultdict(int))
         self._df = defaultdict(lambda: defaultdict(int))
         for document in documents:
             self._dc[None][document.label] += 1
             self._dc[None][None] += 1
             for term in set(document):
+                #self._tc[document.label] += 1
+                #self._tc[None] += 1
                 self._dc[term][document.label] += 1
                 self._dc[term][None] += 1
-        for term in self.terms():
-            for label in self.labels() + [None]:
-                total = self._dc[None][label if term else None]
+        for term in self.terms().union({None}):
+            for label in self.labels().union({None}):
                 dc = self._dc[term][label]
-                self._df[term][label] = abs(log(dc / total)) if self._dc[term][label] else 0
+                if label is None:
+                    total = self._dc[None][label] #/ self._tc[label]
+                else:
+                    total = self._dc[None][None]
+                self._df[term][label] = abs(log(1 + dc / total))
 
     def df(self, term=None, label=None):
         logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
@@ -85,10 +89,10 @@ class Scoring:
         return self._dc[term][label]
 
     def terms(self):
-        return self._dc
+        return set([term for term in self._dc if term is not None])
 
     def labels(self):
-        return [label for label in self._dc[None] if label]
+        return set([label for label in self._dc[None] if label is not None])
 
 
 class Model:
@@ -140,7 +144,7 @@ class Model:
             self._features = sorted([feature for feature in self._scoring.terms()],
                     key=self._d,
                     reverse=True)
-            self._features = self._features[:features_size]
+            self._features = set(self._features[:features_size])
 
     def save(self, file):
         pickle.dump(file, open(file, 'wb'))
@@ -150,16 +154,24 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
-        p = reduce(lambda t1, t2: t1 + self._likelihood(t2, document, label), self._features, 1)
+        p = reduce(lambda p, feature:
+                p + self._likelihood(feature, document, label),
+                self._features.intersection(document.terms), 0)
         logging.debug("p(%s, %s) = %f" % (document.terms, label, p))
         return p
 
-    def _likelihood(self, term, document, label):
-        return reduce(lambda l1, l2: l1 + (1 - self._scoring.df(term, label)),
-                self._scoring.labels(), self._scoring.df(term, label))
+    def _likelihood(self, feature, document, label):
+        return self._scoring.df(feature, label)
 
     def _d(self, feature):
-        return max(self._scoring._df[feature].values()) - min(self._scoring._df[feature].values())
+        df_FL = self._scoring._df[feature][SPAM]
+        df_F = self._scoring._df[feature][None]
+        df_L = self._scoring._df[None][SPAM]
+        numerator = df_FL - df_F * df_L
+        denominator = df_F * (1 - df_F) * df_L * (1 - df_L)
+        if not denominator:
+            import pdb; pdb.set_trace()
+        return abs(numerator / sqrt(denominator))
 
 
 class Classifier:
@@ -207,46 +219,76 @@ class Classifier:
         print("%.2f%% correct" % (sum(corrects.values()) / sum(total.values()) * 100))
 
     def table_terms(self, terms=None):
-        terms = set(terms or self._model._scoring.terms())
+        terms = terms or self._model._scoring.terms()
+        header = ['TERM']
+        for label in self._model._scoring.labels():
+            header.append('DC(%s)' % label)
+            header.append('DF(%s)' % label)
+        header.append('weight')
         rows = []
         for i, term in enumerate(terms):
             row = []
             row.append(term)
-            for label in [SPAM, HAM]:
+            for label in self._model._scoring.labels():
                 row.append(self._model._scoring.dc(term, label))
                 row.append(self._model._scoring.df(term, label))
-            row.append(self._model._scoring.df(term, HAM) - self._model._scoring.df(term, SPAM))
+            row.append(self._model._d(term))
             rows.append(row)
-        return rows
+        return (rows, header)
 
     def table_documents(self, limit=1000, documents=None):
         rows = []
+        header = ['#FEATURES']
+        for label in self._model._scoring.labels():
+            header.append('P(%s)' % label)
+        header.append('FEATURES')
         documents = documents or self._documents(TESTING, limit)
         for document in documents:
-            features=set(self._model._features).intersection(set(document.terms))
-            rows.append((
-                len(features),
-                [self._model._p(document, label) for label in [SPAM, HAM]], features))
-        return rows
+            row = []
+            features = self._model._features.intersection(document.terms)
+            row.append(len(features))
+            for label in self._model._scoring.labels():
+                row.append(self._model._p(document, label))
+            row.append(features)
+            rows.append(row)
+        return (rows, header)
 
-    def dump(self, rows, order_by=0, truncate=None, reverse=True, uniq=0):
+    def stats(self):
+        for label in self._model._scoring.labels():
+            print("Documents for label(%d) = %d" %
+                    (label, self._model._scoring.dc(label=label)))
+        print("Terms = %d" % len(self._model._scoring.terms()))
+        print("Features = %d" % len(self._model._features))
+
+    def dump(self, rows, header=None, output=sys.stdout,
+            order_by=0,
+            truncate=None,
+            reverse=True,
+            uniq=0,
+            formatter=None):
         duplicates = 0
         prev_row = None
         rows = sorted(rows, key=lambda row: row[order_by], reverse=reverse)
         total = len(rows)
         rows = rows[:truncate]
+        output = open(output, 'w')
+        if not formatter:
+            formatter = lambda field: '%010s' % (
+                    round(field, 2) if type(field) is float else field)
+        if header:
+            rows = [header] + rows
         for i, row in enumerate(rows):
             if row[uniq:] == prev_row and i < len(rows) - 1:
                 duplicates += 1
-            else:
-                if duplicates:
-                    print(" (...) %d times" % duplicates)
-                else:
-                    print()
+                continue
+            if duplicates:
+                output.write(" (...) %d times" % duplicates)
                 duplicates = 0
-                print(*row, sep='\t', end='')
-                prev_row = row[uniq:]
-        print("\nTotal = %d rows" % total)
+            i and output.write('\n')
+            output.write('\t'.join([formatter(field) for field in row]))
+            prev_row = row[uniq:]
+        output.write("\nTotal = %d rows" % total)
+        output.close()
 
     def _documents(self, selector, limit):
         data = self._repository.get(selector, limit)
@@ -393,13 +435,15 @@ class Repository:
         key = '%s_%s_%s' % (selector, limit, labels)
 
         if key not in self._data:
+            logging.info("Obtaining from database: %s" % key)
             for label in labels:
                 db = postgresql.open('cereza:moriarty@cerezadbenv1.livra.local/cereza')
                 where_label = 'reason = 9' if label == SPAM else 'reason is null'
                 where_selector = 'mod(c.id, 2) = %d' % selector
-                sql = """select c.id, text from "user" u
+                sql = """select min(c.id), text from "user" u
                             join comment c on c.author_id = u.id
                             where text is not null and %s and %s and random() < 0.5
+                            group by text
                             limit %d""" % (where_label, where_selector, limit)
                 self._data[key] += [(row[1], label, row[0]) for row in db.query(sql)]
 
@@ -407,10 +451,16 @@ class Repository:
 
 
 if __name__ == "__main__":
-    import doctest
-    doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
-    classifier = Classifier(10000, features_size=300)
-    classifier.dump(classifier.table_terms(),
-            order_by=5, truncate=1000, reverse=True, uniq=1)
-    classifier.dump(classifier.table_documents(),
-            order_by=0, truncate=1000, reverse=True, uniq=0)
+    #import doctest
+    #doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
+    logging.basicConfig(
+            filename='blackcherry.log',
+            level=logging.INFO)
+
+    classifier = Classifier(3000, features_size=200)
+    classifier.test(1000)
+    classifier.stats()
+    classifier.dump(*classifier.table_terms(
+        classifier._model._features), order_by=5, reverse=True, output='features.log')
+    classifier.dump(*classifier.table_documents(), output='documents.log',
+            order_by=0, truncate=None, reverse=True, uniq=0)
