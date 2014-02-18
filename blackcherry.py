@@ -5,8 +5,7 @@ import pickle
 import postgresql
 import unicodedata
 import logging
-from math import log
-from math import sqrt
+import math
 from collections import defaultdict
 from functools import reduce
 
@@ -78,7 +77,7 @@ class Scoring:
                     total = self._dc[None][label] #/ self._tc[label]
                 else:
                     total = self._dc[None][None]
-                self._df[term][label] = abs(log(1 + dc / total))
+                self._df[term][label] = dc / total
 
     def df(self, term=None, label=None):
         logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
@@ -154,14 +153,20 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
+        def log(freq):
+            return float('-inf') if freq == 0 else math.log(freq)
+
+        def likelihood(feature):
+            likelihood = self._scoring.df(feature, label)
+            return log(likelihood if feature in document else 1 - likelihood)
+
+        prior = log(self._scoring.df(label=label))
         p = reduce(lambda p, feature:
-                p + self._likelihood(feature, document, label),
-                self._features.intersection(document.terms), 0)
+                p + likelihood(feature),
+                self._features, prior)
+
         logging.debug("p(%s, %s) = %f" % (document.terms, label, p))
         return p
-
-    def _likelihood(self, feature, document, label):
-        return self._scoring.df(feature, label)
 
     def _d(self, feature):
         df_FL = self._scoring._df[feature][SPAM]
@@ -171,7 +176,7 @@ class Model:
         denominator = df_F * (1 - df_F) * df_L * (1 - df_L)
         if not denominator:
             import pdb; pdb.set_trace()
-        return abs(numerator / sqrt(denominator))
+        return abs(numerator / denominator ** 1/2)
 
 
 class Classifier:
@@ -455,7 +460,7 @@ if __name__ == "__main__":
     #doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
     logging.basicConfig(
             filename='blackcherry.log',
-            level=logging.INFO)
+            level=logging.DEBUG)
 
     classifier = Classifier(3000, features_size=200)
     classifier.test(1000)
