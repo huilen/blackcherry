@@ -74,8 +74,6 @@ class Scoring:
             for label in self.labels():
                 total = self._dc[None][label]
                 dc = self._dc[term][label]
-                if not total:
-                    import pdb; pdb.set_trace()
                 self._df[term][label] = abs(log(1 + dc / total))
             self._df[term][None] = abs(log(1 + self._dc[term][None] / self._dc[None][None]))
 
@@ -88,10 +86,10 @@ class Scoring:
         return self._dc[term][label]
 
     def terms(self):
-        return set([term for term in self._dc if term])
+        return set([term for term in self._dc if term is not None])
 
     def labels(self):
-        return set([label for label in self._dc[None] if label])
+        return set([label for label in self._dc[None] if label is not None])
 
 
 class Model:
@@ -153,13 +151,17 @@ class Model:
                 key=lambda label: self._p(document, label))
 
     def _p(self, document, label):
-        p = reduce(lambda t1, t2: t1 + self._likelihood(t2, document, label), self._features, 1)
+        p = reduce(lambda p, feature:
+                p + self._likelihood(feature, label),
+                self._features, 0)
         logging.debug("p(%s, %s) = %f" % (document.terms, label, p))
         return p
 
-    def _likelihood(self, term, document, label):
-        return reduce(lambda l1, l2: l1 + (1 - self._scoring.df(term, label)),
-                self._scoring.labels(), self._scoring.df(term, label))
+    def _likelihood(self, feature, label):
+        not_label = self._scoring.labels() - {label}
+        return reduce(lambda likelihood, label:
+                likelihood + (1 - self._scoring.df(feature, label)),
+                not_label, self._scoring.df(feature, label))
 
     def _d(self, feature):
         return max(self._scoring._df[feature].values()) - min(self._scoring._df[feature].values())
@@ -236,11 +238,9 @@ class Classifier:
     def stats(self):
         for label in self._model._scoring.labels():
             print("Documents for label(%d) = %d" %
-                    (label, self._model._scoring.dc(label)))
-            print("Features for label(%d) = %d" %
-                    (label, len(self._model._features)))
-            print("Terms for label(%d) = %d" %
-                    (label, len(self._model._scoring.terms())))
+                    (label, self._model._scoring.dc(label=label)))
+        print("Terms = %d" % len(self._model._scoring.terms()))
+        print("Features = %d" % len(self._model._features))
 
     def dump(self, rows,
             order_by=0,
@@ -428,8 +428,10 @@ class Repository:
 if __name__ == "__main__":
     import doctest
     doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
-    classifier = Classifier(3000, features_size=150)
+    classifier = Classifier(3000, features_size=100)
     classifier.stats()
-    classifier.dump(classifier.table_terms(), order_by=2, truncate=150, reverse=True, uniq=1)
+    #classifier.test()
+    classifier.dump(classifier.table_terms(), order_by=4, truncate=150, reverse=True, uniq=1)
+    classifier.dump(classifier.table_terms(classifier._model._features))
     classifier.dump(classifier.table_documents(),
-            order_by=0, truncate=1000, reverse=True, uniq=0)
+            order_by=0, truncate=None, reverse=True, uniq=0)
