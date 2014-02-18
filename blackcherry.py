@@ -227,8 +227,7 @@ class Classifier:
             features=set(self._model._features).intersection(set(document.terms))
             rows.append((
                 len(features),
-                [self._model._p(document, label) for label in [SPAM, HAM]],
-                features))
+                [self._model._p(document, label) for label in [SPAM, HAM]], features))
         return rows
 
     def dump(self, rows,
@@ -250,10 +249,10 @@ class Classifier:
                 duplicates += 1
                 continue
             if duplicates:
-                duplicates = 0
-                prev_row = row[uniq:]
                 print(" (...) %d times" % duplicates, end='')
+                duplicates = 0
             print('\n', *[formatter(field) for field in row], sep='\t', end='')
+            prev_row = row[uniq:]
         print("\nTotal = %d rows" % total)
 
     def _documents(self, selector, limit):
