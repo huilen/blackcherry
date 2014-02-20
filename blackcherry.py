@@ -12,15 +12,17 @@ from functools import reduce
 
 HAM, SPAM = range(0, 2)
 TESTING, TRAINING = range(0, 2)
+LIVRA, ENRON = range(0, 2)
 
 
 class Document:
 
     """ A document consists in a list of terms and an optional label. """
 
-    def __init__(self, terms, label=None):
+    def __init__(self, terms, label=None, uniqid=None):
         self.terms = terms
         self.label = label
+        self.uniqid = uniqid
 
     def __iter__(self):
         return self.terms.__iter__()
@@ -28,56 +30,25 @@ class Document:
 
 class Scoring:
 
-    """ Keeps the document counts and frequencies of a collection of documents.
-
-    Creating a scoring for a collection of documents:
-
-        >>> documents = [ \
-                Document(terms=['A', 'B', 'A'], label=HAM), \
-                Document(terms=['x', 'B', 'x'], label=HAM), \
-                Document(terms=['B', 'x', 'x'], label=HAM), \
-                Document(terms=['x', 'x', 'B'], label=HAM), \
-                Document(terms=['x', 'x', 'x'], label=HAM), \
-                Document(terms=['A', 'x', 'x'], label=SPAM), \
-                Document(terms=['x', 'A', 'x'], label=SPAM), \
-                Document(terms=['x', 'x', 'x'], label=SPAM), \
-                Document(terms=['A', 'B', 'x'], label=SPAM), \
-                Document(terms=['x', 'A', 'A'], label=SPAM)]
-        >>> scoring = Scoring(documents)
-
-    To get the document counts:
-
-        >>> scoring.dc('A', SPAM)
-        4
-        >>> scoring.dc(label=SPAM)
-        5
-        >>> scoring.dc('A')
-        5
-        >>> scoring.dc()
-        10
-
-    """
+    """ Keeps the document counts and frequencies of a collection of documents. """
 
     def __init__(self, documents):
-        #self._tc = defaultdict(int)
         self._dc = defaultdict(lambda: defaultdict(int))
         self._df = defaultdict(lambda: defaultdict(int))
         for document in documents:
             self._dc[None][document.label] += 1
             self._dc[None][None] += 1
             for term in set(document):
-                #self._tc[document.label] += 1
-                #self._tc[None] += 1
                 self._dc[term][document.label] += 1
                 self._dc[term][None] += 1
         for term in self.terms().union({None}):
             for label in self.labels().union({None}):
                 dc = self._dc[term][label]
-                if label is None:
-                    total = self._dc[None][label] #/ self._tc[label]
-                else:
-                    total = self._dc[None][None]
-                self._df[term][label] = dc / total
+                total = self._dc[None][label] #/ self._tc[label]
+                self._df[term][label] = abs(math.log(1 + dc / total))
+            dc = self._dc[term][None]
+            self._df[term][None] = self._dc[None][None] #/ self._tc[None]
+            self._df[None][None] = 1
 
     def df(self, term=None, label=None):
         logging.debug("df(%s, %s) = %f" % (term, label, self._dc[term][label]))
@@ -96,43 +67,10 @@ class Scoring:
 
 class Model:
 
-    """ The model receives a collection of documents and builds a score of them
+    """
+    The model receives a collection of documents and builds a score of them
     to make predictions of the label of the documents in function of their
     terms.
-
-        >>> documents = [ \
-                Document(terms=['A', 'B', 'A'], label=HAM), \
-                Document(terms=['x', 'B', 'x'], label=HAM), \
-                Document(terms=['B', 'x', 'x'], label=HAM), \
-                Document(terms=['x', 'x', 'B'], label=HAM), \
-                Document(terms=['x', 'x', 'x'], label=HAM), \
-                Document(terms=['A', 'x', 'x'], label=SPAM), \
-                Document(terms=['x', 'A', 'x'], label=SPAM), \
-                Document(terms=['x', 'x', 'x'], label=SPAM), \
-                Document(terms=['A', 'B', 'x'], label=SPAM), \
-                Document(terms=['x', 'A', 'A'], label=SPAM)]
-        >>> model = Model(documents, features_size=100)
-
-        >>> test = model._p(Document(terms=['A', 'x']), SPAM)
-        >>> correct = test
-        >>> round(test, 3) == round(correct, 3)
-        True
-
-        >>> test = model._p(Document(terms=['B', 'x']), SPAM)
-        >>> correct = test
-        >>> round(test, 3) == round(correct, 3)
-        True
-
-        >>> test = model._p(Document(terms=['A', 'x']), HAM)
-        >>> correct = test
-        >>> round(test, 3) == round(correct, 3)
-        True
-
-        >>> test = model._p(Document(terms=['B', 'x']), HAM)
-        >>> correct = test
-        >>> round(test, 3) == round(correct, 3)
-        True
-
     """
 
     def __init__(self, documents, features_size, file=None):
@@ -161,6 +99,7 @@ class Model:
             return log(likelihood if feature in document else 1 - likelihood)
 
         prior = log(self._scoring.df(label=label))
+
         p = reduce(lambda p, feature:
                 p + likelihood(feature),
                 self._features, prior)
@@ -174,154 +113,12 @@ class Model:
         df_L = self._scoring._df[None][SPAM]
         numerator = df_FL - df_F * df_L
         denominator = df_F * (1 - df_F) * df_L * (1 - df_L)
-        if not denominator:
-            import pdb; pdb.set_trace()
         return abs(numerator / denominator ** 1/2)
-
-
-class Classifier:
-
-    """ The classifier does the following things:
-
-        1) Gets the training data from a repository.
-
-        2) Builds the documents from that obtained data processing it with a tokenizer.
-
-        3) Creates a model and trains it with the builded documents.
-
-        4) Uses the model to classify new documents.
-
-    """
-
-    def __init__(self, limit=10000, features_size=300):
-        self._tokenizer = Tokenizer()
-        self._repository = Repository('repository.db')
-        self._model = Model(self._documents(TRAINING, limit), features_size)
-
-    def save(self, file):
-        self._model.save(file)
-
-    def classify(self, text):
-        document = Document(self._tokenizer.tokens(text))
-        return self._model.classify(self, document)
-
-    def test(self, limit=1000):
-        total = defaultdict(int)
-        corrects = defaultdict(int)
-        documents = self._documents(TESTING, limit)
-
-        mod = len(documents) / 100 * 10
-        for i, document in enumerate(documents):
-            if document.label == self._model.classify(document):
-                corrects[document.label] += 1
-            total[document.label] += 1
-            if not i % mod:
-                percentage = i / len(documents) * 100
-                print("%d%% label(%s) documents tested" % (percentage, document.label))
-
-        print("%d/%d spam detected" % (corrects[SPAM], total[SPAM]))
-        print("%d/%d ham detected" % (corrects[HAM], total[HAM]))
-        print("%.2f%% correct" % (sum(corrects.values()) / sum(total.values()) * 100))
-
-    def table_terms(self, terms=None):
-        terms = terms or self._model._scoring.terms()
-        header = ['TERM']
-        for label in self._model._scoring.labels():
-            header.append('DC(%s)' % label)
-            header.append('DF(%s)' % label)
-        header.append('weight')
-        rows = []
-        for i, term in enumerate(terms):
-            row = []
-            row.append(term)
-            for label in self._model._scoring.labels():
-                row.append(self._model._scoring.dc(term, label))
-                row.append(self._model._scoring.df(term, label))
-            row.append(self._model._d(term))
-            rows.append(row)
-        return (rows, header)
-
-    def table_documents(self, limit=1000, documents=None):
-        rows = []
-        header = ['#FEATURES']
-        for label in self._model._scoring.labels():
-            header.append('P(%s)' % label)
-        header.append('FEATURES')
-        documents = documents or self._documents(TESTING, limit)
-        for document in documents:
-            row = []
-            features = self._model._features.intersection(document.terms)
-            row.append(len(features))
-            for label in self._model._scoring.labels():
-                row.append(self._model._p(document, label))
-            row.append(features)
-            rows.append(row)
-        return (rows, header)
-
-    def stats(self):
-        for label in self._model._scoring.labels():
-            print("Documents for label(%d) = %d" %
-                    (label, self._model._scoring.dc(label=label)))
-        print("Terms = %d" % len(self._model._scoring.terms()))
-        print("Features = %d" % len(self._model._features))
-
-    def dump(self, rows, header=None, output=sys.stdout,
-            order_by=0,
-            truncate=None,
-            reverse=True,
-            uniq=0,
-            formatter=None):
-        duplicates = 0
-        prev_row = None
-        rows = sorted(rows, key=lambda row: row[order_by], reverse=reverse)
-        total = len(rows)
-        rows = rows[:truncate]
-        output = open(output, 'w')
-        if not formatter:
-            formatter = lambda field: '%010s' % (
-                    round(field, 2) if type(field) is float else field)
-        if header:
-            rows = [header] + rows
-        for i, row in enumerate(rows):
-            if row[uniq:] == prev_row and i < len(rows) - 1:
-                duplicates += 1
-                continue
-            if duplicates:
-                output.write(" (...) %d times" % duplicates)
-                duplicates = 0
-            i and output.write('\n')
-            output.write('\t'.join([formatter(field) for field in row]))
-            prev_row = row[uniq:]
-        output.write("\nTotal = %d rows" % total)
-        output.close()
-
-    def _documents(self, selector, limit):
-        data = self._repository.get(selector, limit)
-        return [Document(self._tokenizer.tokens(row[0]), label=row[1]) for row in data]
 
 
 class Tokenizer:
 
-    """ Divide the given string into a list of substrings
-
-    Creating a tokenizer:
-
-        >>> tokenizer = Tokenizer()
-        >>> tokenizer.tokens('Con la grande polvareda, perdieron a Don Beltrán. \
-                Nunca lo echaron de menos, hasta los muertos pasar.')
-        ['con', 'la', 'grande', 'polvareda', 'perdieron', 'a', 'don', 'beltran',
-                'nunca', 'lo', 'echaron', 'de', 'menos', 'hasta', 'los',
-                'muertos', 'pasar']
-
-    Enabling meta tokens:
-
-        >>> tokenizer.set_meta_tokens()
-        >>> tokenizer.set_size_meta_tokens()
-        >>> sorted(tokenizer.tokens('Buy VIAGRA! dontbeleveus@itsallalie.com'))
-        ['__ALLCAPS__', '__EMAIL__', '__SIZE10-49__',
-                'buy', 'com', 'dontbeleveus', 'itsallalie', 'viagra']
-
-    """
+    """ Divide the given string into a list of substrings. """
 
     def __init__(self):
         self._token_pattern = re.compile("\w+")
@@ -389,83 +186,274 @@ class Tokenizer:
         return tokens
 
 
+class RepositorExhaustedError(Exception):
+    pass
+
+
 class Repository:
 
-    """ Loads data from the repository.
-
-    Creating a new repository:
-
-        >>> repository = Repository()
-
-    @selector determines a set target, so you may be sure that you are working
-    always with different sets for training that for testing.
-
-        >>> training_data = repository.get(selector=TESTING, limit=100)
-        >>> testing_data = repository.get(selector=TRAINING, limit=100)
-        >>> len([row for row in training_data if row in testing_data])
-        0
-
-    @limit determines the number of rows to get for each label.
-
-        >>> data = repository.get(selector=TRAINING, limit=100)
-        >>> len(data)
-        200
-
-    @labels is a list with the labels to filter, the default value is [SPAM, HAM].
-
-        >>> data = repository.get(selector=TRAINING, limit=100, labels=[SPAM])
-        >>> len(data)
-        100
-
-    Saving a repository:
-
-        >>> repository.save('repository.db')
-
-    Loading an existent repository:
-
-        >>> repository = Repository('repository.db')
-
-    """
-
-    def __init__(self, file=None):
-        if file:
-            self._data = pickle.load(open(file, 'rb'))
+    def __init__(self):
+        if os.path.isfile('.cache'):
+            self._cache = pickle.load(open('.cache', 'rb'))
         else:
-            self._data = defaultdict(list)
+            self._cache = {}
+        self._sources = {}
+        self._sources[LIVRA] = self._get_from_livra
+        self._sources[ENRON] = self._get_from_enron
 
-    def save(self, file):
-        pickle.dump(self._data, open(file, 'wb'))
+    def get(self, selector, source, limit, labels=[SPAM, HAM], settings=[]):
+        key = '%s_%s_%s_%s' % (selector, limit, labels, source)
+        if key not in self._cache:
+            logging.info("Obtaining from source: %s" % key)
+            data = self._sources[source](selector, limit, labels, *settings)
+            if len(data) != limit * len(labels):
+                raise DataSetExhaustedError
+            else:
+                self._cache[key] = data
+                pickle.dump(self._cache, open('.cache', 'wb'))
+            logging.info("Obtained from source: %s" % len(self._cache[key]))
+        else:
+            logging.info("Obtained from cache: %s" % len(self._cache[key]))
 
-    def get(self, selector, limit, labels=[SPAM, HAM]):
-        key = '%s_%s_%s' % (selector, limit, labels)
+        return self._cache[key]
 
-        if key not in self._data:
-            logging.info("Obtaining from database: %s" % key)
-            for label in labels:
-                db = postgresql.open('cereza:moriarty@cerezadbenv1.livra.local/cereza')
-                where_label = 'reason = 9' if label == SPAM else 'reason is null'
-                where_selector = 'mod(c.id, 2) = %d' % selector
-                sql = """select min(c.id), text from "user" u
-                            join comment c on c.author_id = u.id
-                            where text is not null and %s and %s and random() < 0.5
-                            group by text
-                            limit %d""" % (where_label, where_selector, limit)
-                self._data[key] += [(row[1], label, row[0]) for row in db.query(sql)]
+    def _get_from_livra(self, selector, limit, labels, where_custom=''):
+        rows = []
+        for label in labels:
+            db = postgresql.open('cereza:moriarty@cerezadbenv1.livra.local/cereza')
+            where_label = 'reason = 9' if label == SPAM else 'reason is null'
+            where_selector = 'mod(c.id, 2) = %d' % selector
+            sql = """select min(c.id), text from "user" u
+                        join comment c on c.author_id = u.id
+                        where text is not null and %s and %s and %s
+                        group by text
+                        limit %d""" % (where_label, where_selector,
+                                where_custom, limit)
+            rows += [(row[1], label, row[0]) for row in db.query(sql)]
+        return rows
 
-        return self._data[key]
+    def _get_from_enron(self, selector, limit, labels):
+        rows = []
+        for label in labels:
+            directory = 'corpus/enron/%s/%s' % (selector, label)
+            for f in os.listdir(directory)[:limit]:
+                with open(os.path.join(directory, f), 'rb') as f:
+                    rows.append((f.read().decode('latin-1'), label, f.name))
+        return rows
+
+
+class Test:
+
+    def __init__(self, name):
+        self.name = name
+
+    def run(self):
+        if os.path.exists('tests/%s' % self.name):
+            for f in os.listdir('tests/%s' % self.name):
+                os.remove('tests/%s/%s' % (self.name, f))
+        else:
+            os.makedirs('tests/%s' % self.name)
+
+        logging.basicConfig(
+                filename='tests/%s/%s.log' % (self.name, self.name),
+                level=logging.DEBUG)
+
+        self.tokenizer = self.tokenizer()
+
+        logging.info("Building testing set")
+        self.testing_documents = self.documents(self.testing_set())
+        logging.info("Testing set builded")
+
+        logging.info("Building training set")
+        self.training_documents = self.documents(self.training_set())
+        logging.info("Training set builded")
+
+        logging.info("Initializing model")
+        self.model = self.model(self.training_documents)
+
+        logging.info("Generating table of test results")
+        self.dump(*self.table_test(),
+                output='tests/%s/test_result.log' % self.name)
+
+        logging.info("Generating table of model stats")
+        self.dump(*self.table_model_stats(),
+                output='tests/%s/model_stats.log' % self.name)
+
+        logging.info("Generating table of features stats in training set")
+        self.dump(*self.table_features_stats(self.training_documents),
+                output='tests/%s/training_features_stats.log' % self.name,
+                order_by=0, reverse=True)
+
+        logging.info("Generating table of features stats in testing set")
+        self.dump(*self.table_features_stats(self.testing_documents),
+                output='tests/%s/testing_features_stats.log' % self.name,
+                order_by=0, reverse=True)
+
+        logging.info("Generating table of documents")
+        self.dump(*self.table_documents(),
+                output='tests/%s/documents.log' % self.name,
+                order_by=0, reverse=True, uniq=0)
+
+        logging.info("Generating table of terms")
+        self.dump(*self.table_terms(),
+                output='tests/%s/terms.log' % self.name,
+                order_by=5, reverse=True)
+
+    def documents(self, data_set):
+        documents = [Document(
+            self.tokenizer.tokens(row[0]),
+            label=row[1],
+            uniqid=row[2]) for row in data_set]
+        return documents
+
+    def table_test(self):
+        rows = []
+        header = ('LABEL', 'CORRECTS', 'INCORRECTS', 'PERCENTAGE')
+
+        total = defaultdict(int)
+        corrects = defaultdict(int)
+
+        mod = len(self.testing_documents) / 100 * 10
+        for i, document in enumerate(self.testing_documents):
+            if document.label == self.model.classify(document):
+                corrects[document.label] += 1
+            total[document.label] += 1
+            if not i % mod:
+                percentage = i / len(self.testing_documents) * 100
+                logging.info("%d%% label(%s) documents tested" % (percentage, document.label))
+
+        for label in total.keys():
+            incorrects = total[label] - corrects[label]
+            percentage = corrects[label] / total[label] * 100
+            rows.append((label, corrects[label], incorrects, percentage))
+
+        logging.info("%.2f%% correct" % (sum(corrects.values()) / sum(total.values()) * 100))
+        return (rows, header)
+
+    def table_features_stats(self, documents):
+        rows = []
+        header = ('FEATURES', 'DOCUMENTS')
+        counter = defaultdict(int)
+        for document in documents:
+            size = len(self.model._features.intersection(document))
+            counter[size] += 1
+        for size, count in counter.items():
+            rows.append((size, count))
+        return (rows, header)
+
+    def table_terms(self):
+        header = ['TERM']
+        for label in self.model._scoring.labels():
+            header.append('DC(%s)' % label)
+            header.append('DF(%s)' % label)
+        header.append('WEIGHT')
+        rows = []
+        for i, term in enumerate(self.model._scoring.terms()):
+            row = []
+            row.append(term)
+            for label in self.model._scoring.labels():
+                row.append(self.model._scoring.dc(term, label))
+                row.append(self.model._scoring.df(term, label))
+            row.append(self.model._d(term))
+            rows.append(row)
+        return (rows, header)
+
+    def table_documents(self):
+        rows = []
+        header = ['#FEATURES']
+        for label in self.model._scoring.labels():
+            header.append('P(%s)' % label)
+        header.append('LABEL')
+        header.append('PREDICTION')
+        header.append('ID')
+        header.append('FEATURES')
+        for document in self.testing_documents:
+            row = []
+            features = self.model._features.intersection(document.terms)
+            row.append(len(features))
+            for label in self.model._scoring.labels():
+                row.append(self.model._p(document, label))
+            row.append(document.label)
+            row.append(self.model.classify(document))
+            row.append(document.uniqid)
+            row.append(features)
+            rows.append(row)
+        return (rows, header)
+
+    def table_model_stats(self):
+        header = ['TERMS', 'FEATURES']
+        row = []
+        for label in self.model._scoring.labels():
+            header.append('DOCUMENTS(%s)' % label)
+            row.append(self.model._scoring.dc(label=label))
+        row.append(len(self.model._scoring.terms()))
+        row.append(len(self.model._features))
+        return ([row], header)
+
+    def dump(self, rows, header=None, output=sys.stdout,
+            order_by=0,
+            truncate=None,
+            reverse=True,
+            uniq=0,
+            formatter=None):
+        duplicates = 0
+        prev_row = None
+        rows = sorted(rows, key=lambda row: row[order_by], reverse=reverse)
+        total = len(rows)
+        rows = rows[:truncate]
+        output = open(output, 'w')
+        if not formatter:
+            formatter = lambda field: '%010s' % (
+                    round(field, 2) if type(field) is float else field)
+        if header:
+            rows = [header] + rows
+        for i, row in enumerate(rows):
+            if row[uniq:] == prev_row and i < len(rows) - 1:
+                duplicates += 1
+                continue
+            if duplicates:
+                output.write(" (...) %d times" % duplicates)
+                duplicates = 0
+            i and output.write('\n')
+            output.write('\t'.join([formatter(field) for field in row]))
+            prev_row = row[uniq:]
+        output.write("\nTotal = %d rows" % total)
+        output.close()
 
 
 if __name__ == "__main__":
-    #import doctest
-    #doctest.testmod(optionflags=doctest.NORMALIZE_WHITESPACE)
-    logging.basicConfig(
-            filename='blackcherry.log',
-            level=logging.DEBUG)
+    repository = Repository()
 
-    classifier = Classifier(3000, features_size=200)
-    classifier.test(1000)
-    classifier.stats()
-    classifier.dump(*classifier.table_terms(
-        classifier._model._features), order_by=5, reverse=True, output='features.log')
-    classifier.dump(*classifier.table_documents(), output='documents.log',
-            order_by=0, truncate=None, reverse=True, uniq=0)
+    test_battery = []
+
+    test = Test('test1')
+    test.tokenizer = lambda: Tokenizer()
+    test.model = lambda training_documents: Model(training_documents, 500)
+    test.training_set = lambda: repository.get(
+            selector=TRAINING,
+            source=LIVRA,
+            limit=3000,
+            settings=['c.creation_date > now() - interval \'3 year\''])
+    test.testing_set = lambda: repository.get(
+            selector=TESTING,
+            source=LIVRA,
+            limit=100,
+            settings=['c.creation_date < now() - interval \'1 year\''])
+    test_battery.append(test)
+
+    test = Test('test2')
+    test.tokenizer = lambda: Tokenizer()
+    test.model = lambda training_documents: Model(training_documents, 500)
+    test.training_set = lambda: repository.get(selector=TRAINING, source=ENRON, limit=1500)
+    test.testing_set = lambda: repository.get(selector=TESTING, source=ENRON, limit=1000)
+    test_battery.append(test)
+
+    test = Test('test3')
+    test.tokenizer = lambda: Tokenizer()
+    test.model = lambda training_documents: Model(training_documents, 500)
+    test.training_set = lambda: repository.get(selector=TRAINING, source=LIVRA, limit=3000)
+    test.testing_set = lambda: repository.get(selector=TESTING, source=LIVRA, limit=100)
+    test_battery.append(test)
+
+    for test in test_battery:
+        test.run()
